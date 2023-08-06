@@ -1,0 +1,8 @@
+{:deps {org.clojure/clojure {:mvn/version "1.11.0"}
+
+        instaparse/instaparse                                       {:mvn/version "1.4.12"}
+        org.clojure/core.match                                      {:mvn/version "1.0.1"}
+        org.clojars.cartesiantheatrics/manifold3d$linux-cuda-x86_64 {:mvn/version "1.0.64"}
+        ;; org.clojars.cartesiantheatrics/manifold3d {:local/root "../manifold/bindings/java/target/manifold3d-1.0.8.jar"}
+        sicmutils/sicmutils                                         {:mvn/version "0.22.0"}
+        plexus/plexus                                               {:local/root "../plexus"}}}
