@@ -150,7 +150,7 @@
             (nil? line) (persistent! commands)
             (.startsWith line "G10") (let [last-line (nth commands (dec idx))
                                            llast-line (nth commands (- idx 2))]
-                                       (if (and (> layer 2)
+                                       (if (and (> layer 0)
                                                 (.startsWith last-line "G1 ")
                                                 (.startsWith llast-line "G1 "))
                                          (let [last-command (parse-command last-line)
@@ -165,17 +165,13 @@
                                                new-p (e/+ p1 (e/* (normalise direction) new-extrude-length))
                                                _ (magnitude (e/- new-p p1))
                                                extrusion (- e2 e1)
-                                               new-e (e/+ e2 (* extrusion (/ new-extrude-length distance)))]
+                                               new-e (e/+ e1 (* extrusion (/ new-extrude-length distance)))]
                                            (recur (-> (pop! commands)
-                                                      (conj! (to-command (assoc last-command
-                                                                                :X (nth new-p 0)
-                                                                                :Y (nth new-p 1)
-                                                                                :E new-e)))
                                                       (conj! (to-command (assoc last-command
                                                                                 :E new-e)))
                                                       (conj! line))
                                                   layer
-                                                  (+ idx 2)))
+                                                  (+ idx 1)))
                                          (recur (conj! commands line) layer (inc idx))))
             (.startsWith line ";LAYER:") (recur (conj! commands line) (inc layer) (inc idx))
             :else (recur (conj! commands line) layer (inc idx))))))))
@@ -191,7 +187,7 @@
 
   (import )
 
-  (def lines (time (process-gcode "CFFFP_six-pod-segments-7-9.gcode" 1.5)))
+  (def lines (time (process-gcode "CFFFP_six-pod-segments-7-9.gcode" 4.0)))
 
   (write-lines-to-file "CFFFP_six-pod-segments-7-9-with-coasting.gcode" lines)
 
