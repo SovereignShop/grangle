@@ -135,7 +135,9 @@
                  (vreset! i (dec @i))
                  ret))))))
 
-(defn process-gcode [filename coast-distance ]
+(defn process-gcode
+  ""
+  [filename coast-distance meshes]
   (with-open [reader (BufferedReader. (FileReader. filename))]
     (let [{:keys [layer-height]}
           (parse-header
@@ -143,94 +145,60 @@
                         (s/join "\n" (for [_ (range 4)]
                                        (.readLine reader)))))]
       (loop [commands (transient [])
+             mesh nil
              layer 0
              idx 0]
         (let [^String line (.readLine reader)]
           (cond
-            (nil? line) (persistent! commands)
-            (.startsWith line "G10") (let [last-line (nth commands (dec idx))
-                                           llast-line (nth commands (- idx 2))]
-                                       (if (and (> layer 0)
-                                                (.startsWith last-line "G1 ")
-                                                (.startsWith llast-line "G1 "))
-                                         (let [last-command (parse-command last-line)
-                                               llast-command (parse-command llast-line)
-                                               e2 (:E last-command)
-                                               p2 [(:X last-command) (:Y last-command)]
-                                               p1 [(:X llast-command) (:Y llast-command)]
-                                               e1 (:E llast-command)
-                                               direction (e/- p2 p1)
-                                               distance (magnitude direction)
-                                               new-extrude-length (- distance coast-distance)
-                                               new-p (e/+ p1 (e/* (normalise direction) new-extrude-length))
-                                               _ (magnitude (e/- new-p p1))
-                                               extrusion (- e2 e1)
-                                               new-e (e/+ e1 (* extrusion (/ new-extrude-length distance)))]
-                                           (recur (-> (pop! commands)
-                                                      (conj! (to-command (assoc last-command
-                                                                                :E new-e)))
-                                                      (conj! line))
-                                                  layer
-                                                  (+ idx 1)))
-                                         (recur (conj! commands line) layer (inc idx))))
-            (.startsWith line ";LAYER:") (recur (conj! commands line) (inc layer) (inc idx))
-            :else (recur (conj! commands line) layer (inc idx))))))))
+            (nil? line)
+            (persistent! commands)
 
+            (and (contains? meshes mesh) (.startsWith line "G10"))
+            (let [last-line (nth commands (dec idx))
+                  llast-line (nth commands (- idx 2))]
+              (if (and (> layer 0)
+                       (.startsWith last-line "G1 ")
+                       (.startsWith llast-line "G1 "))
+                (let [last-command (parse-command last-line)
+                      llast-command (parse-command llast-line)
+                      e2 (:E last-command)
+                      p2 [(:X last-command) (:Y last-command)]
+                      p1 [(:X llast-command) (:Y llast-command)]
+                      e1 (:E llast-command)
+                      direction (e/- p2 p1)
+                      distance (magnitude direction)
+                      new-extrude-length (- distance coast-distance)
+                      new-p (e/+ p1 (e/* (normalise direction) new-extrude-length))
+                      _ (magnitude (e/- new-p p1))
+                      extrusion (- e2 e1)
+                      new-e (e/+ e1 (* extrusion (/ new-extrude-length distance)))]
+                  (recur (-> (pop! commands)
+                             (conj! (to-command (assoc last-command :E new-e)))
+                             (conj! line))
+                         mesh
+                         layer
+                         (+ idx 1)))
+                (recur (conj! commands line) mesh layer (inc idx))))
+
+            (.startsWith line ";LAYER:")
+            (recur (conj! commands line) mesh (inc layer) (inc idx))
+
+            (.startsWith line ";MESH:")
+            (recur (conj! commands line) (subs line 6) layer (inc idx))
+
+            :else
+            (recur (conj! commands line) mesh layer (inc idx))))))))
+
+;; 671190
+;;
 (comment
-  (parse-gcode (s/join "\n" (take 100 lines)))
 
-  (e/orthonormalize [4 2])
+  (def lines (time (process-gcode "CFFFP_six-pod-segments-2-9.gcode" 8.0 #{"six-pod-segments-2-9.glb"
+                                                                           "first-six-pod-segment.glb"})))
 
-  (parse-gcode "G1 X5.385 Y-111.456 E0.70762 ;wtf")
-
-  (parse-gcode "M82 ;absolute extrusion mode")
-
-  (import )
-
-  (def lines (time (process-gcode "CFFFP_six-pod-segments-7-9.gcode" 4.0)))
-
-  (write-lines-to-file "CFFFP_six-pod-segments-7-9-with-coasting.gcode" lines)
+  (write-lines-to-file "CFFFP_six-pod-tower-all-segments.gcode" lines)
 
 
-  (count lines)
-
-
-
-  (count lines)
 
 
   )
-
-(defn walk-gcode [parsed-gcode]
-  (let [header (parse-header (second parsed-gcode))
-        layer-height (:layer-height header)
-        lines (drop 3 parsed-gcode)]
-    (reductions
-     (fn [state line]
-       (match line
-              [:layer layer-number]
-              (let [n (Integer/parseInt layer-number)]
-                (-> state
-                    (assoc :layer n)
-                    (assoc :Z (* n layer-height))))
-
-              [:type layer-type]
-              (-> state
-                  (assoc :type (keyword layer-type)))
-
-              [:command "G" (:or "1" "0") & args]
-              (let [m (->> args
-                           (partition 2)
-                           (map (fn [[letter digit]]
-                                  [(keyword letter) (parse-double digit)]))
-                           (into {}))]
-                (cond-> (merge state m)))
-
-              [:command "G" "10" & args]
-              #dbg state
-
-              :else state))
-     header
-     lines)))
-
-(last (walk-gcode parsed-gcode))
