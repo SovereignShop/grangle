@@ -55,14 +55,6 @@
 (defn parse-gcode [gcode-str]
   (insta/parse parser gcode-str))
 
-(def gcode (slurp "CFFFP_six-pod-segments-7-9.gcode"))
-(def lines (s/split-lines gcode))
-(def first-line (first lines))
-
-(count lines)
-
-(def parsed-gcode (parse-gcode (s/join "\n" (take 10000 lines))))
-
 (defn parse-double [x]
   (Double/parseDouble x))
 
@@ -82,7 +74,7 @@
     (->> args
          (map (fn [[letter digit]]
                 (when (map-entry? digit)
-                  #dbg digit)
+                  digit)
                 [(keyword letter) (parse-double digit)]))
          (into {:name (apply str name)}))))
 
@@ -135,72 +127,186 @@
                  (vreset! i (dec @i))
                  ret))))))
 
+(defn buffered-reader-to-array [br]
+  (let [lines (java.util.ArrayList.)]
+    (loop [^String line (.readLine br)]
+      (when line
+        (.add lines line)
+        (recur (.readLine br))))
+    (into-array String lines)))
+
+(defn parse-gcode-move [gcode-str]
+  (let [x-index (.indexOf gcode-str "X")
+        x-end   (.indexOf gcode-str " " (inc x-index))
+        x-val   (subs gcode-str (inc x-index) x-end)
+
+        y-index (.indexOf gcode-str "Y" x-end)
+        y-end   (let [i (.indexOf gcode-str " " (inc y-index))]
+                  (if (= i -1) (.length gcode-str) i))
+        y-val   (subs gcode-str (inc y-index) y-end)]
+    (double-array [(Double/parseDouble x-val) (Double/parseDouble y-val)])))
+
+(defn find-pos [lines idx]
+  (if (< idx 0)
+    (throw (Exception. "No pos found. Index is negative"))
+    (let [^String line (aget lines idx)]
+      (if (or (.startsWith line "G1 ")
+              (.startsWith line "G0 "))
+        ^doubles (parse-gcode-move line)
+        (recur lines (dec idx))))))
+
+(defn next-command-index
+  ([lines idx]
+   (if (>= idx (alength lines))
+     nil
+     (let [line (aget lines idx)]
+       (if (.startsWith line ";")
+         (recur lines (inc idx))
+         idx))))
+  ([lines idx command-name]
+   (if (>= idx (alength lines))
+     nil
+     (let [line (aget lines idx)]
+       (if (.startsWith line ";")
+         (recur lines (inc idx) command-name)
+         (if (.startsWith line command-name)
+           idx
+           (recur lines (inc idx) command-name)))))))
+
 (defn process-gcode
-  [& {:keys [filename coast-distance meshes min-retract-dists]}]
+  [& {:keys [filename coast-distance meshes min-retract-dists z-hop]}]
   (with-open [reader (BufferedReader. (FileReader. filename))]
     (let [header-lines (for [_ (range 4)]
                          (.readLine reader))
           {:keys [layer-height]}
           (parse-header
-           (insta/parse header-parser (s/join "\n" header-lines)))]
+           (insta/parse header-parser (s/join "\n" header-lines)))
+          lines (buffered-reader-to-array reader)]
       (loop [commands (transient (vec header-lines))
              mesh nil
              layer 0
              idx 0]
-        (let [^String line (.readLine reader)]
-          (cond
-            (nil? line)
-            (persistent! commands)
+        (when (zero? (mod idx 500))
+          (println "at index:" idx))
+        (if (>= idx (alength lines))
+          (persistent! commands)
+          (let [^String line (aget lines idx)]
+            (cond
+              (.startsWith line "G10")
+              (let [unretract-index (next-command-index lines (inc idx) "G11")]
+                (if-not unretract-index
+                  (recur (conj! commands line) mesh layer (inc idx))
+                  (let [skip-retract (if-let [min-dist (get min-retract-dists mesh)]
+                                       (let [next-idx (next-command-index lines (inc idx))
+                                             _ (when (> (- next-idx idx) 3)
+                                                 (throw (Exception. "Unknown error finding next command index")))
+                                             next-line (aget lines next-idx)
+                                             ^doubles current-pos (find-pos lines idx)]
+                                         (if (.startsWith next-line "G0")
+                                           (let [^doubles next-pos (find-pos lines (inc idx))
+                                                 dx (Math/abs (- (aget next-pos 0) (aget current-pos 0)))
+                                                 dy (Math/abs (- (aget next-pos 1) (aget current-pos 1)))
+                                                 dist (Math/sqrt (+ (Math/pow dx 2) (Math/pow dy 2)))]
+                                             (if (<= dist min-dist)
+                                               true
+                                               false))
+                                           false))
+                                       false)
+                        last-line (nth lines (dec idx))
+                        llast-line (nth lines (- idx 2))
+                        unretract-index (next-command-index lines (inc idx) "G11")
+                        is-coast (and (> layer 0)
+                                      (contains? meshes mesh)
+                                      (.startsWith last-line "G1 ")
+                                      (.startsWith llast-line "G1 "))
+                        commands (if is-coast
+                                   (let [last-command (parse-command last-line)
+                                         llast-command (parse-command llast-line)
+                                         e2 (:E last-command)
+                                         p2 [(:X last-command) (:Y last-command)]
+                                         p1 [(:X llast-command) (:Y llast-command)]
+                                         e1 (:E llast-command)
+                                         direction (e/- p2 p1)
+                                         distance (magnitude direction)
+                                         new-extrude-length (- distance coast-distance)
+                                         new-p (e/+ p1 (e/* (normalise direction) new-extrude-length))
+                                         _ (magnitude (e/- new-p p1))
+                                         extrusion (- e2 e1)
+                                         new-e (e/+ e1 (* extrusion (/ new-extrude-length distance)))]
+                                     (conj! (pop! commands) (to-command (assoc last-command :E new-e))))
+                                   commands)
 
-            (.startsWith line "G10")
-            #_(and (contains? meshes mesh)
-                 (.startsWith line "G10")
-                 (> layer 0))
-            (let [commands (if (contains? min-retract-dists mesh)
-                             (let []))
-                  last-line (nth commands (dec idx))
-                  llast-line (nth commands (- idx 2))]
-              (if (and (> layer 0)
-                       (.startsWith last-line "G1 ")
-                       (.startsWith llast-line "G1 "))
-                (let [last-command (parse-command last-line)
-                      llast-command (parse-command llast-line)
-                      e2 (:E last-command)
-                      p2 [(:X last-command) (:Y last-command)]
-                      p1 [(:X llast-command) (:Y llast-command)]
-                      e1 (:E llast-command)
-                      direction (e/- p2 p1)
-                      distance (magnitude direction)
-                      new-extrude-length (- distance coast-distance)
-                      new-p (e/+ p1 (e/* (normalise direction) new-extrude-length))
-                      _ (magnitude (e/- new-p p1))
-                      extrusion (- e2 e1)
-                      new-e (e/+ e1 (* extrusion (/ new-extrude-length distance)))]
-                  (recur (-> (pop! commands)
-                             (conj! (to-command (assoc last-command :E new-e)))
-                             (conj! line))
-                         mesh
-                         layer
-                         (+ idx 1)))
-                (recur (conj! commands line) mesh layer (inc idx))))
+                        [cmds layer mesh]
+                        (loop [cmds commands
+                               i idx
+                               new-layer layer
+                               mesh mesh]
+                          (if (> i unretract-index)
+                            [cmds new-layer mesh]
+                            (let [l (aget lines i)]
+                              (cond
+                                (and skip-retract (or (.startsWith l "G10") (.startsWith l "G11")))
+                                (recur cmds (inc i) new-layer mesh)
 
-            (.startsWith line ";LAYER:")
-            (recur (conj! commands line) mesh (inc layer) (inc idx))
+                                (and z-hop
+                                     (not skip-retract)
+                                     (>= layer (or (:start-layer z-hop) 0))
+                                     (<= layer (or (:end-layer z-hop) 0))
+                                     (or (= i idx) (= i (dec unretract-index))))
+                                (let [{:keys [speed height]} z-hop
+                                      current-height (* new-layer layer-height)]
+                                  (recur
+                                   (if (= i idx)
+                                     (-> cmds
+                                         (conj! l)
+                                         (conj! (str "G0 F" speed " Z" (+ current-height height))))
+                                     (-> cmds
+                                         (conj! l)
+                                         (conj! (str "G0 F" speed " Z" current-height))))
+                                   (inc i)
+                                   new-layer
+                                   mesh))
 
-            (.startsWith line ";MESH:")
-            (recur (conj! commands line) (subs line 6) layer (inc idx))
+                                (.startsWith l ";LAYER:") (recur (conj! cmds l) (inc i) (inc new-layer) mesh)
+                                (.startsWith l ";MESH:") (recur (conj! cmds l) (inc i) new-layer (subs l 6))
+                                (.startsWith l ";") (recur (conj! cmds l) (inc i) new-layer mesh)
 
-            :else
-            (recur (conj! commands line) mesh layer (inc idx))))))))
+                                :else (recur (conj! cmds l) (inc i) new-layer mesh)))))]
+                    (recur cmds
+                           mesh
+                           layer
+                           (inc unretract-index)))))
+
+              (.startsWith line ";LAYER:")
+              (recur (conj! commands line) mesh (inc layer) (inc idx))
+
+              (.startsWith line ";MESH:")
+              (recur (conj! commands line) (subs line 6) layer (inc idx))
+
+              :else
+              (recur (conj! commands line) mesh layer (inc idx)))))))))
 
 ;; 671190
 ;;
 (comment
 
-  (def lines (time (process-gcode "CFFFP_six-pod-segments-2-9.gcode" 8.0 #{"six-pod-segments-2-9.glb"
-                                                                           "first-six-pod-segment.glb"})))
+  (def lines (time (process-gcode :filename "CFFFP_six-pod-tower-all-segments.gcode"
+                                  :coast-distance 8.0
+                                  :meshes #{"six-pod-segments-2-9.glb"
+                                            "first-six-pod-segment.glb"}
+                                  :min-retract-dists {"five-gallon-bucket-lid.glb" 3.5}
+                                  :z-hop {:height 1.0
+                                          :speed 1500
+                                          :start-layer 0
+                                          :end-layer (+ 1 (/ 12 1/4))})))
 
-  (write-lines-to-file "CFFFP_six-pod-tower-all-segments.gcode" lines)
+
+  ;; 1172661
+  ;; 1148904
+  ;; 1191958
+  (count lines)
+
+  (write-lines-to-file "CFFFP_six-pod-tower-all-segments-processed.gcode" lines)
 
 
 
