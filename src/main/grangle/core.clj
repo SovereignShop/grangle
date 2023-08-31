@@ -136,15 +136,14 @@
                  ret))))))
 
 (defn process-gcode
-  ""
-  [filename coast-distance meshes]
+  [& {:keys [filename coast-distance meshes min-retract-dists]}]
   (with-open [reader (BufferedReader. (FileReader. filename))]
-    (let [{:keys [layer-height]}
+    (let [header-lines (for [_ (range 4)]
+                         (.readLine reader))
+          {:keys [layer-height]}
           (parse-header
-           (insta/parse header-parser
-                        (s/join "\n" (for [_ (range 4)]
-                                       (.readLine reader)))))]
-      (loop [commands (transient [])
+           (insta/parse header-parser (s/join "\n" header-lines)))]
+      (loop [commands (transient (vec header-lines))
              mesh nil
              layer 0
              idx 0]
@@ -153,8 +152,13 @@
             (nil? line)
             (persistent! commands)
 
-            (and (contains? meshes mesh) (.startsWith line "G10"))
-            (let [last-line (nth commands (dec idx))
+            (.startsWith line "G10")
+            #_(and (contains? meshes mesh)
+                 (.startsWith line "G10")
+                 (> layer 0))
+            (let [commands (if (contains? min-retract-dists mesh)
+                             (let []))
+                  last-line (nth commands (dec idx))
                   llast-line (nth commands (- idx 2))]
               (if (and (> layer 0)
                        (.startsWith last-line "G1 ")
