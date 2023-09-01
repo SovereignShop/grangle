@@ -150,8 +150,8 @@
   (if (< idx 0)
     (throw (Exception. "No pos found. Index is negative"))
     (let [^String line (aget lines idx)]
-      (if (or (.startsWith line "G1 ")
-              (.startsWith line "G0 "))
+      (if (or (.startsWith line "G1 X")
+              (.startsWith line "G0 X"))
         ^doubles (parse-gcode-move line)
         (recur lines (dec idx))))))
 
@@ -186,8 +186,6 @@
              mesh nil
              layer 0
              idx 0]
-        (when (zero? (mod idx 500))
-          (println "at index:" idx))
         (if (>= idx (alength lines))
           (persistent! commands)
           (let [^String line (aget lines idx)]
@@ -196,25 +194,23 @@
               (let [unretract-index (next-command-index lines (inc idx) "G11")]
                 (if-not unretract-index
                   (recur (conj! commands line) mesh layer (inc idx))
-                  (let [skip-retract (if-let [min-dist (get min-retract-dists mesh)]
-                                       (let [next-idx (next-command-index lines (inc idx))
-                                             _ (when (> (- next-idx idx) 3)
-                                                 (throw (Exception. "Unknown error finding next command index")))
-                                             next-line (aget lines next-idx)
-                                             ^doubles current-pos (find-pos lines idx)]
-                                         (if (.startsWith next-line "G0")
-                                           (let [^doubles next-pos (find-pos lines (inc idx))
-                                                 dx (Math/abs (- (aget next-pos 0) (aget current-pos 0)))
-                                                 dy (Math/abs (- (aget next-pos 1) (aget current-pos 1)))
-                                                 dist (Math/sqrt (+ (Math/pow dx 2) (Math/pow dy 2)))]
-                                             (if (<= dist min-dist)
-                                               true
-                                               false))
-                                           false))
-                                       false)
+                  (let [unretract-index (next-command-index lines (inc idx) "G11")
+                        travel-dist (let [next-idx (next-command-index lines (inc idx) "G0")
+                                          _ (when (> next-idx unretract-index)
+                                              (throw (Exception. "walked passed unretract index!")))
+                                          next-line (aget lines next-idx)
+                                          ^doubles current-pos (find-pos lines idx)]
+                                           (if (.startsWith next-line "G0")
+                                             (let [^doubles next-pos (parse-gcode-move next-line)
+                                                   dx (Math/abs (- (aget next-pos 0) (aget current-pos 0)))
+                                                   dy (Math/abs (- (aget next-pos 1) (aget current-pos 1)))
+                                                   dist (Math/sqrt (+ (Math/pow dx 2) (Math/pow dy 2)))]
+                                               dist)
+                                             (throw (Exception. "Unknown Error!"))))
+                        skip-retract (when-let [min-dist (get min-retract-dists mesh)]
+                                       (<= travel-dist min-dist))
                         last-line (nth lines (dec idx))
                         llast-line (nth lines (- idx 2))
-                        unretract-index (next-command-index lines (inc idx) "G11")
                         is-coast (and (> layer 0)
                                       (contains? meshes mesh)
                                       (.startsWith last-line "G1 ")
@@ -252,7 +248,9 @@
                                      (not skip-retract)
                                      (>= layer (or (:start-layer z-hop) 0))
                                      (<= layer (or (:end-layer z-hop) 0))
-                                     (or (= i idx) (= i (dec unretract-index))))
+                                     (>= travel-dist (or (:min-dist z-hop) 0))
+                                     (or (.startsWith l "G10")
+                                         (.startsWith l "G11")))
                                 (let [{:keys [speed height]} z-hop
                                       current-height (* new-layer layer-height)]
                                   (recur
@@ -267,7 +265,9 @@
                                    new-layer
                                    mesh))
 
-                                (.startsWith l ";LAYER:") (recur (conj! cmds l) (inc i) (inc new-layer) mesh)
+                                (.startsWith l ";LAYER:")
+                                (do (println (:end-layer z-hop) (<= layer (or (:end-layer z-hop) 0)))
+                                    (recur (conj! cmds l) (inc i) (inc new-layer) mesh))
                                 (.startsWith l ";MESH:") (recur (conj! cmds l) (inc i) new-layer (subs l 6))
                                 (.startsWith l ";") (recur (conj! cmds l) (inc i) new-layer mesh)
 
@@ -290,14 +290,15 @@
 ;;
 (comment
 
-  (def lines (time (process-gcode :filename "CFFFP_six-pod-tower-all-segments.gcode"
+  (def lines (time (process-gcode :filename "CFFFP_six-pod-segments-2-9.gcode"
                                   :coast-distance 8.0
                                   :meshes #{"six-pod-segments-2-9.glb"
                                             "first-six-pod-segment.glb"}
                                   :min-retract-dists {"five-gallon-bucket-lid.glb" 3.5}
                                   :z-hop {:height 1.0
-                                          :speed 1500
+                                          :speed 10000
                                           :start-layer 0
+                                          :min-dist 4
                                           :end-layer (+ 1 (/ 12 1/4))})))
 
 
