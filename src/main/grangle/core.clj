@@ -291,14 +291,14 @@
 (comment
 
   (def lines (time (process-gcode :filename "CFFFP_six-pod-segments-2-9.gcode"
-                                  :coast-distance 8.0
+                                  :coast-distance 1.0
                                   :meshes #{"six-pod-segments-2-9.glb"
                                             "first-six-pod-segment.glb"}
                                   :min-retract-dists {"five-gallon-bucket-lid.glb" 3.5}
                                   :z-hop {:height 1.0
                                           :speed 10000
                                           :start-layer 0
-                                          :min-dist 4
+                                          :min-dist 10
                                           :end-layer (+ 1 (/ 12 1/4))})))
 
 
