@@ -286,9 +286,48 @@
               :else
               (recur (conj! commands line) mesh layer (inc idx)))))))))
 
+
+(defn concat-gcodes
+  [fname-a fname-b split-layer]
+  (with-open [reader-a (BufferedReader. (FileReader. fname-a))
+              reader-b (BufferedReader. (FileReader. fname-b))]
+    (let [lines
+          (loop [ret (transient [])
+                 layer 0]
+            (let [line (.readLine reader-a)]
+              (cond (.startsWith line ";LAYER:")
+                    (if (= layer split-layer)
+                      (conj! ret line)
+                      (recur (conj! ret line) (unchecked-inc layer)))
+
+                    :else
+                    (recur (conj! ret line) layer))))]
+
+      (doall
+       (take-while #(not (.startsWith % (format ";LAYER:%s" split-layer)))
+                   (repeatedly #(.readLine reader-b))))
+
+      (loop [commands lines]
+          (let [line (.readLine reader-b)]
+            (cond
+              (nil? line) (persistent! commands)
+
+              :else
+              (recur (conj! commands line))))))))
+
 ;; 671190
 ;;
 (comment
+
+  (def desktop-tower-lines
+    (concat-gcodes
+     "CFFFP_tower-base.gcode"
+     "CFFFP_tower-spiralized-section.gcode"
+     67))
+
+  (write-lines-to-file "CFFFP_desktop-tower.gcode" desktop-tower-lines)
+
+  (count desktop-tower-lines)
 
   (def lines (time (process-gcode :filename "CFFFP_six-pod-segments-2-9.gcode"
                                   :coast-distance 1.0
